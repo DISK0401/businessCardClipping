@@ -1,0 +1,195 @@
+<html>
+
+<head>
+    <link href="https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css" rel="stylesheet">
+</head>
+
+<body>
+    <div id="app" class="p-3">
+        <div v-if="!initialized">
+            opencvを準備中です...しばらくお待ちください。
+        </div>
+        <div v-else>
+            <input type="file" accept="image/*" @change="onFileChange">
+            <div class="pt-3 clear-both" v-if="imageData">
+                <button type="button" class="bg-indigo-500 text-indigo-50 p-2 rounded mb-3"
+                    @click="transform">歪みを修正する</button>
+            </div>
+            <div class="pt-3" v-if="imageData">
+                <img id="image" class="float-left" :src="imageData" v-if="imageData">
+                <h2>■■ 結果 ■■</h2>
+                <canvas id="result"></canvas>
+                <h2>■■ 過程 ■■</h2>
+                <h3>◆グレースケール化</h3>
+                <canvas id="gray_img"></canvas>
+                <h3>◆2値化</h3>
+                <canvas id="binary_img"></canvas>
+                <h3>◆ノイズ処理(膨張)</h3>
+                <canvas id="median_img"></canvas>
+                <h3>◆全輪郭を出力</h3>
+                <canvas id="draw_all_contours"></canvas>
+                <h3>◆矩形のみを出力</h3>
+                <canvas id="draw_rectangle_contours"></canvas>
+            </div>
+        </div>
+    </div>
+    <script src="https://unpkg.com/vue@3.0.2/dist/vue.global.prod.js"></script>
+    <script src="https://docs.opencv.org/4.5.2/opencv.js"></script>
+    <script>
+
+        Vue.createApp({
+            data() {
+                return {
+                    initialized: false,
+                    imageData: null,
+                    THRESHOLD: 255, // モノクロのしきい値
+                }
+            },
+            methods: {
+                onFileChange(e) {
+
+                    const files = e.target.files;
+                    if (files.length > 0) {
+                        const file = files[0];
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            this.imageData = e.target.result;
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                },
+
+                // opencv
+                transform() {
+
+                    const imageElement = document.querySelector('#image');
+                    const img = cv.imread(imageElement);
+                    const pts = this.getContoursPoints(img);
+
+                    if (pts) {
+
+                        const transformedIm = this.getTransformedImage(img, pts);
+                        cv.imshow('result', transformedIm);
+                        console.log('Done!');
+                    } else {
+                        console.log('Failed...');
+                    }
+                    img.delete();
+
+                },
+                getContoursPoints(img) {
+
+                    /* ==== 画像を2値化する ===== */
+                    // Grayscale
+                    let gray_img = new cv.Mat();
+                    cv.cvtColor(img, gray_img, cv.COLOR_RGBA2GRAY)
+                    cv.imshow('gray_img', gray_img);
+                    // Threshold
+                    let binary_img  = new cv.Mat();
+                    cv.adaptiveThreshold(gray_img, binary_img, this.THRESHOLD, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 255, 2);
+                    cv.imshow('binary_img', binary_img);
+                    gray_img.delete();
+                    console.log('threshold done!')
+
+                    /* ==== ノイズ処理を行う(膨張させる) ==== */
+                    let median_img =new cv.Mat();
+                    cv.medianBlur(binary_img, median_img, 9);
+                    cv.imshow('median_img',median_img);
+                    binary_img.delete();
+                    console.log('median done!')
+
+                    /* ==== 輪郭の一覧を取得する ==== */
+                    let contours = new cv.MatVector();
+                    let hierarchy = new cv.Mat();
+                    cv.findContours(median_img, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
+                    median_img.delete();
+
+                    /* == 全輪郭を描いてみる == */
+                    this.drow_contours(img.clone(), contours, 'draw_all_contours');
+                    console.log('contours done!')
+
+                    /* ==== 輪郭を矩形のみになる条件で絞り込む ==== */
+                    let pts = null;
+                    // let img_size = img.cols * img.rows;
+                    // console.log('画像サイズ:',img.cols.toLocaleString(),'(横), ', img.rows.toLocaleString(), '(縦)');
+                    // console.log('画像面積:',img_size.toLocaleString(),'px');
+                    // let approx_contours = new cv.MatVector();
+                    // for (let i = 0; i < contours.size(); ++i) {
+                    //     let cnt = contours.get(i);
+                    //     const arclen = cv.arcLength(cnt, true);
+                    //     const area = cv.contourArea(cnt);
+                    //     if(arclen != 0 && (img_size * 0.02 < area < img_size * 0.9)){
+                    //         let approx = new cv.Mat();
+                    //         const epsilon = 0.02 * arclen;
+                    //         cv.approxPolyDP(cnt, approx, epsilon, true);
+                    //         if (approx.size().height === 4){
+                    //             approx_contours.push_back(approx);
+                    //         }
+                    //     }
+                    //     cnt.delete();
+                    // }
+                    let maxCntArea = 0;
+                    let approx_contours = null;
+                    const imRectArea = img.cols * img.rows
+                    for(let i = 0; i < contours.size(); ++i) {
+                        let cnt = contours.get(i);
+                        const cntArea = cv.contourArea(cnt);
+                        if(cntArea > maxCntArea) { // より大きいものをキープ
+                            let approx = new cv.Mat();
+                            const epsilon = 0.02 * cv.arcLength(cnt, true)
+                            cv.approxPolyDP(cnt, approx, epsilon, true)
+                            if(approx.size().height === 4) { // 四角形ならキープ
+                                console.log(i,'/',contours.size());
+                                maxCntArea = cntArea;
+                                pts = approx;
+                                let tmp = new cv.MatVector();
+                                tmp.push_back(approx);
+                                approx_contours = tmp;
+                            }
+                        }
+                    }
+                    /* == 矩形のみを描いてみる == */
+                    this.drow_contours(img.clone(), approx_contours, 'draw_rectangle_contours');
+
+                    /* ====  ==== */
+                    pts.convertTo(pts, cv.CV_32FC2);
+                    return pts
+                },
+                drow_contours(img, contours, name){
+                    let hierarchy = new cv.Mat()
+                    for (let i = 0; i < contours.size(); ++i) {
+                        let color = new cv.Scalar(255,0,255,255);
+                        cv.drawContours(img, contours, -1, color, 1, cv.LINE_8, hierarchy, 100);
+                    }
+                    cv.imshow(name, img);
+                    hierarchy.delete();
+                },
+                getTransformedImage(im, fromPts) {
+
+                    let transformedIm = new cv.Mat();
+                    const rows = im.rows;
+                    const cols = im.cols;
+                    let dsize = new cv.Size(cols, rows);
+                    const toPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+                        cols, 0, 0, 0, 0, rows, cols, rows
+                    ]);
+                    const M = cv.getPerspectiveTransform(fromPts, toPts); // 変形の行列
+                    cv.warpPerspective(im, transformedIm, M, dsize);
+
+                    fromPts.delete();
+                    toPts.delete();
+                    return transformedIm;
+
+                }
+
+            },
+            mounted() {
+                cv['onRuntimeInitialized'] = () => {
+                    this.initialized = true;
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+
+</html>
